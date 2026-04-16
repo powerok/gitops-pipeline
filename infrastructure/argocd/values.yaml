@@ -1,0 +1,112 @@
+# =============================================================
+# ArgoCD Helm Chart values.yaml
+# Helm Chart: argo/argo-cd (https://argoproj.github.io/argo-helm)
+#
+# 설치 명령어:
+#   helm repo add argo https://argoproj.github.io/argo-helm
+#   helm repo update
+#   helm upgrade --install argocd argo/argo-cd \
+#     --namespace argocd --create-namespace \
+#     -f infrastructure/argocd/values.yaml
+# =============================================================
+
+# ── 전역 설정 ─────────────────────────────────────────────────
+global:
+  domain: argocd.local # Ingress 도메인
+
+# ── ArgoCD 서버 설정 ──────────────────────────────────────────
+server:
+  # Ingress 설정
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    hostname: argocd.local
+    paths:
+      - path: /
+        pathType: Prefix
+
+  # HTTP 모드로 실행 (Self-signed 인증서 없이 간편하게 접근)
+  # 운영 환경에서는 TLS를 활성화해야 한다.
+  insecure: true
+
+  # 서비스 타입 (NodePort를 통한 직접 접근)
+  service:
+    type: NodePort
+    nodePortHttp: 30004
+    nodePortHttps: 30005
+
+  # 리소스 설정
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# ── ArgoCD 설정 파라미터 ──────────────────────────────────────
+configs:
+  params:
+    # HTTPS 없이 HTTP로 실행 허용
+    server.insecure: "true"
+    # ApplicationSet 컨트롤러 활성화
+    applicationsetcontroller.enable.progressive.syncs: "true"
+
+  # ArgoCD 기본 Secret (admin 비밀번호)
+  secret:
+    # bcrypt 해시로 비밀번호 설정: "ArgoCD@Admin2024!"
+    # 생성: htpasswd -nbBC 10 "" "ArgoCD@Admin2024!" | tr -d ':\n' | sed 's/$2y/$2a/'
+    argocdServerAdminPassword: "$2a$10$hVPPvHlg5vqLfI.N0yBivOGb2kSGunBSnhUkRPJgDIbxIhrpk.Emy"
+
+  # Gitea 리포지토리 연결 설정
+  repositories:
+    # App 소스 리포지토리 (모니터링 불필요, 참조용)
+    order-api:
+      url: http://gitea.local/gitops/order-api.git
+      name: order-api
+      type: git
+
+    # Ops 리포지토리 (ArgoCD가 이 리포지토리를 모니터링)
+    order-ops:
+      url: http://gitea.local/gitops/order-ops.git
+      name: order-ops
+      type: git
+      username: jenkins-bot
+      password: "ec05d6a3ae4fe6b2e9a202c514fd8707b1b43699"
+
+# ── Application Controller ────────────────────────────────────
+controller:
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+
+# ── Repo Server ───────────────────────────────────────────────
+repoServer:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# ── Dex (SSO) - 개발 환경에서는 비활성화 ─────────────────────
+dex:
+  enabled: false
+
+# ── Redis (ArgoCD 내장) ───────────────────────────────────────
+redis:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi

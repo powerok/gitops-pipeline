@@ -1,0 +1,3 @@
+#!/bin/bash
+K3S_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' k3s-server)
+docker compose run --rm --entrypoint /bin/bash step-07-jenkins -c "helm upgrade --install jenkins jenkins/jenkins --namespace jenkins -f infrastructure/jenkins/values.yaml --set \"controller.hostAliases[0].ip=${K3S_IP}\" --set \"controller.hostAliases[0].hostnames[0]=gitea.local\" --set \"controller.hostAliases[0].hostnames[1]=harbor.local\" --set \"controller.hostAliases[0].hostnames[2]=argocd.local\" --set \"agent.hostAliases[0].ip=${K3S_IP}\" --set \"agent.hostAliases[0].hostnames[0]=gitea.local\" --set \"agent.hostAliases[0].hostnames[1]=harbor.local\" --set \"agent.hostAliases[0].hostnames[2]=argocd.local\""

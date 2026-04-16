@@ -1,0 +1,288 @@
+# =============================================================
+# Jenkins Helm Chart values.yaml
+# Helm Chart: jenkins/jenkins (https://charts.jenkins.io)
+#
+# 설치 명령어:
+#   helm repo add jenkins https://charts.jenkins.io
+#   helm repo update
+#   helm upgrade --install jenkins jenkins/jenkins \
+#     --namespace jenkins --create-namespace \
+#     -f infrastructure/jenkins/values.yaml
+# =============================================================
+
+controller:
+  # ── Jenkins 이미지 설정 ────────────────────────────────────
+  image:
+    registry: "docker.io"
+    repository: "jenkins/jenkins"
+    tag: "lts-jdk21"
+  imagePullPolicy: IfNotPresent
+
+  # ── 권한 및 필로그인 초기화 설정 추가 ──────────────────────
+  runAsUser: 0
+  runAsGroup: 0
+  fsGroup: 0
+  initContainerSecurityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    readOnlyRootFilesystem: false
+  overwritePlugins: true
+  
+  overwritePlugins: true
+
+  # ── SSH 키 파일 마운트 (libcrypto 오류 방지용) ─────────────
+  extraVolumes:
+    - name: ssh-key-volume
+      projected:
+        defaultMode: 0400
+        sources:
+          - secret:
+              name: jenkins-secrets
+              items:
+                - key: gitea-ssh-key
+                  path: id_ed25519
+  extraVolumeMounts:
+    - name: ssh-key-volume
+      mountPath: /var/jenkins_ssh
+      readOnly: true
+
+  # ── 관리자 계정 ────────────────────────────────────────────
+  admin:
+    username: "admin"
+    password: "Jenkins@Admin2024!"
+
+  # ── 서비스 설정 ────────────────────────────────────────────
+  serviceType: NodePort
+  nodePort: 30003 # 외부 접근: http://localhost:30003
+
+  # ── Ingress 설정 ───────────────────────────────────────────
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "0"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    hostName: "jenkins.local"
+    paths:
+      - path: "/"
+        pathType: Prefix
+        # 아래 설정을 추가하여 백엔드 서비스와 포트를 명시합니다.
+        backend:
+          service:
+            name: jenkins
+            port:
+              number: 8080 # Jenkins 내부 통신 포트
+
+  # ── JVM 옵션 ───────────────────────────────────────────────
+  javaOpts: >-
+    -Xmx1024m
+    -Xms512m
+    -Dhudson.slaves.NodeProvisioner.initialDelay=0
+    -Dhudson.model.LoadStatistics.decay=0.9
+    -Dhudson.plugins.git.GitStatus.NOTIFY_COMMIT_TOKEN_REQUIRED=false
+
+  # ── Jenkins 환경 설정 ──────────────────────────────────────
+  jenkinsUrl: "http://jenkins.local"
+  numExecutors: 2
+
+  # ── 플러그인 목록 (자동 설치) ─────────────────────────────
+  # [주의] blueocean은 Jenkins LTS(lts-jdk21)와 sse-gateway 클래스 충돌로 제거
+  #        pipeline-stage-view / build-timeline-widget 으로 대체
+  installPlugins:
+    - kubernetes:latest
+    - workflow-aggregator:latest
+    - git:latest
+    - gogs-webhook:latest
+    - configuration-as-code:latest
+    - credentials-binding:latest
+    - gitea:latest
+    - harbor:latest
+    - docker-workflow:latest
+    - pipeline-stage-view:latest
+    - ansicolor:latest
+    - timestamper:latest
+    - ws-cleanup:latest
+    - matrix-auth:latest
+    - job-dsl:latest
+    - ssh-agent:latest
+    - build-timeout:latest
+    - github:latest
+    - generic-webhook-trigger:latest
+    - dashboard-view:latest
+
+  # ── Jenkins Configuration as Code (JCasC) ─────────────────
+  JCasC:
+    defaultConfig: true
+    configScripts:
+      # 0. 보안 (익명 읽기 + 빌드 트리거 허용)
+      security: |
+        jenkins:
+          authorizationStrategy:
+            globalMatrix:
+              permissions:
+                - "Overall/Administer:authenticated"
+                - "Overall/Read:anonymous"
+                - "Job/Read:anonymous"
+                - "Job/Build:anonymous"
+                - "Job/Cancel:anonymous"
+
+      # 1. Gitea 및 Harbor Credentials 자동 설정 (기존)
+      credentials: |
+        credentials:
+          system:
+            domainCredentials:
+              - credentials:
+                  - usernamePassword:
+                      scope: GLOBAL
+                      id: "gitea-jenkins-credentials"
+                      username: "jenkins-bot"
+                      password: "${GITEA_JENKINS_PASS}"
+                      description: "Gitea Jenkins 봇 계정 자격증명"
+                  - usernamePassword:
+                      scope: GLOBAL
+                      id: "harbor-credentials"
+                      username: "admin"
+                      password: "${HARBOR_ADMIN_PASSWORD}"
+                      description: "Harbor 레지스트리 관리자 자격증명"
+                  - usernamePassword:
+                      scope: GLOBAL
+                      id: "gitea-ops-credentials"
+                      username: "jenkins-bot"
+                      password: "${GITEA_JENKINS_PASS}"
+                      description: "Gitea Ops 리포지토리 자격증명"
+                  - basicSSHUserPrivateKey:
+                      scope: GLOBAL
+                      id: "gitea-ssh-credentials"
+                      username: "jenkins-bot"
+                      description: "Gitea SSH Private Key"
+                      privateKeySource:
+                        directEntry:
+                          privateKey: "${GITEA_SSH_KEY}"
+
+      # 2. Gitea 서버 및 Webhook Secret 설정 (추가됨)
+      gitea-server: |
+        unclassified:
+          giteaServers:
+            servers:
+              - displayName: "Local Gitea"
+                serverUrl: "http://gitea.local"
+                # alias 대신 aliasUrl 을 사용하거나, 필요 없다면 생략 가능합니다.
+                aliasUrl: "http://gitea.local"
+                # Credentials ID를 연결해주는 것이 좋습니다.
+                credentialsId: "gitea-jenkins-credentials"
+                # Webhook을 Jenkins가 직접 관리하게 하려면 true,
+                # setup-webhook.sh로 수동 등록한다면 false로 설정합니다.
+                manageHooks: false
+
+      # 3. 전역 파이프라인 라이브러리 설정 (Shared Library)
+      pipeline-library: |
+        unclassified:
+          globalLibraries:
+            libraries:
+              - name: "gitops-shared-lib"
+                defaultVersion: "main"
+                implicit: true           # 모든 Jenkinsfile에서 자동으로 로드
+                retriever:
+                  modernSCM:
+                    scm:
+                      git:
+                        remote: "http://gitea.local/gitops/jenkins-shared-library.git"
+                        credentialsId: "gitea-jenkins-credentials"
+
+      # 4. Jenkins Job 자동 생성 (Job DSL)
+      jobs: |
+        jobs:
+          - script: >
+              pipelineJob('order-api-pipeline') {
+                  triggers {
+                      genericTrigger {
+                          genericVariables {
+                              genericVariable {
+                                  key('ref')
+                                  value('$.ref')
+                              }
+                          }
+                          token('order-api-token-2024')
+                          printContributedVariables(true)
+                          printPostContent(true)
+                          silentResponse(false)
+                      }
+                  }
+                  definition {
+                      cpsScm {
+                          scm {
+                              git {
+                                  remote {
+                                      url('http://gitea.local/gitops/order-api.git')
+                                      credentials('gitea-jenkins-credentials')
+                                  }
+                                  branches('*/main')
+                              }
+                          }
+                          scriptPath('Jenkinsfile')
+                      }
+                  }
+              }
+
+  # ── 환경 변수 (시크릿에서 주입) ───────────────────────────
+  containerEnv:
+    - name: GITEA_JENKINS_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: jenkins-secrets
+          key: gitea-token
+    - name: GITEA_JENKINS_PASS
+      valueFrom:
+        secretKeyRef:
+          name: jenkins-secrets
+          key: gitea-password
+    - name: HARBOR_ADMIN_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: jenkins-secrets
+          key: harbor-password
+    - name: GITEA_SSH_KEY
+      valueFrom:
+        secretKeyRef:
+          name: jenkins-secrets
+          key: gitea-ssh-key # directEntry 방식으로 JCasC에 주입됨
+
+  # ── 리소스 제한 ────────────────────────────────────────────
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2000m"
+      memory: "2Gi"
+
+# ── Jenkins Agent (DooD 방식) ─────────────────────────────────
+agent:
+  enabled: true
+  image:
+    registry: "docker.io"
+    repository: "jenkins/inbound-agent"
+    tag: "3273.v1093b_ff033d9-1"
+  # Docker 소켓 마운트 (Docker-outside-of-Docker)
+  volumes:
+    - type: HostPath
+      hostPath: /var/run/docker.sock
+      mountPath: /var/run/docker.sock
+
+  # Docker CLI 실행에 필요한 권한
+  podRetention: "Default"
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+# ── 영구 스토리지 ─────────────────────────────────────────────
+persistence:
+  enabled: true
+  storageClass: "local-path"
+  size: 20Gi
+  accessMode: ReadWriteOnce

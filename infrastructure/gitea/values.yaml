@@ -1,0 +1,111 @@
+# =============================================================
+# Gitea Helm Chart values.yaml
+# Helm Chart: gitea-charts/gitea (https://dl.gitea.io/charts/)
+#
+# 설치 명령어:
+#   helm repo add gitea-charts https://dl.gitea.io/charts/
+#   helm repo update
+#   helm upgrade --install gitea gitea-charts/gitea \
+#     --namespace gitea --create-namespace \
+#     -f infrastructure/gitea/values.yaml
+# =============================================================
+
+# ── 서비스 설정 ───────────────────────────────────────────────
+service:
+  http:
+    type: NodePort
+    port: 3000
+    nodePort: 30001 # 외부에서 http://localhost:30001 로 접근
+  ssh:
+    type: ClusterIP
+    port: 22
+
+# ── Ingress 설정 ──────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx # ingress-nginx 컨트롤러 사용
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0" # Git LFS를 위한 무제한 바디 크기
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+  hosts:
+    - host: gitea.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+# ── Gitea 앱 설정 ─────────────────────────────────────────────
+gitea:
+  admin:
+    username: gitea-admin
+    password: "Gitea@Admin2024!" # 초기 비밀번호 (설치 후 변경 권장)
+    email: "admin@gitea.local"
+
+  config:
+    APP_NAME: "GitOps Gitea"
+    server:
+      # 외부 접근 URL (Ingress 도메인)
+      ROOT_URL: "http://gitea.local"
+      DOMAIN: "gitea.local"
+      SSH_DOMAIN: "gitea.local"
+      HTTP_PORT: 3000
+      SSH_PORT: 22
+
+    database:
+      DB_TYPE: postgres # PostgreSQL 사용 (기본값 SQLite 대신)
+
+    service:
+      # Jenkins Webhook 호출을 위해 외부 요청 허용
+      DISABLE_REGISTRATION: false
+      REQUIRE_SIGNIN_VIEW: false
+      DEFAULT_KEEP_EMAIL_PRIVATE: false
+      ALLOW_ONLY_EXTERNAL_REGISTRATION: false
+
+    webhook:
+      # Jenkins Webhook 연동을 위한 설정
+      ALLOWED_HOST_LIST: "*, private, loopback" # 내부망(private) 허용 필수
+      SKIP_TLS_VERIFY: true # Self-signed 인증서 환경에서 TLS 검증 건너뛰기
+
+    security:
+      INSTALL_LOCK: true # 설치 완료 후 잠금 (재설치 방지)
+
+# ── PostgreSQL 설정 ───────────────────────────────────────────
+postgresql:
+  enabled: true
+  global:
+    postgresql:
+      auth:
+        database: gitea
+        username: gitea
+        password: "Gitea@DB2024!"
+postgresql-ha:
+  enabled: false
+
+# ── 캐시 설정 (Redis / Valkey) ────────────────────────────────
+# 단일 노드 K3s 환경이므로 3중화 클러스터를 비활성화하고 Standalone으로 실행
+valkey-cluster:
+  enabled: false
+redis-cluster:
+  enabled: false
+
+valkey:
+  enabled: true
+  architecture: standalone
+redis:
+  enabled: false
+
+# ── 영구 스토리지 설정 ────────────────────────────────────────
+persistence:
+  enabled: true
+  storageClass: "local-path" # K3s 기본 local-path-provisioner 사용
+  size: 10Gi
+  accessModes:
+    - ReadWriteOnce
+
+# ── 리소스 제한 ───────────────────────────────────────────────
+resources:
+  requests:
+    cpu: "100m"
+    memory: "256Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"

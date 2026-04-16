@@ -1,0 +1,120 @@
+# =============================================================
+# Spring Boot 애플리케이션 설정 (K8s 프로파일)
+# 파일 위치: (App 리포지토리) src/main/resources/application-k8s.yml
+#
+# 목적: K8s 환경에서 사용되는 Spring Boot 설정을 정의한다.
+#       환경 변수(ConfigMap/Secret)로 주입되는 값들을 바인딩한다.
+# =============================================================
+
+spring:
+  # ── 데이터소스 (PostgreSQL) ───────────────────────────────
+  datasource:
+    # URL은 ConfigMap의 SPRING_DATASOURCE_URL 환경변수로 주입됨
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/orderdb}
+    # 계정은 Secret의 환경변수로 주입됨
+    username: ${SPRING_DATASOURCE_USERNAME:orderuser}
+    password: ${SPRING_DATASOURCE_PASSWORD:changeme}
+    driver-class-name: org.postgresql.Driver
+
+    # HikariCP 커넥션 풀 설정 (K8s 환경 최적화)
+    hikari:
+      # 최대 커넥션 수: Pod 수 × 이 값이 DB 최대 커넥션을 초과하지 않도록 설정
+      maximum-pool-size: 10
+      minimum-idle: 2
+      # 커넥션 타임아웃: Init Container로 DB 준비를 보장하지만 안전 마진 유지
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      # K8s 환경에서 커넥션 유효성 검사 (네트워크 단절 후 복구 대응)
+      keepalive-time: 60000
+      connection-test-query: SELECT 1
+
+  # ── JPA 설정 ──────────────────────────────────────────────
+  jpa:
+    hibernate:
+      # K8s 운영 환경: validate (스키마 변경 방지)
+      # 개발 환경: update
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: false
+
+  # ── Redis 설정 (Sidecar) ──────────────────────────────────
+  data:
+    redis:
+      # Sidecar이므로 항상 localhost 사용
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: ${SPRING_REDIS_PORT:6379}
+      # 캐시 TTL: 기본 1시간
+      timeout: 60000
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 4
+          min-idle: 1
+
+  # ── 캐시 설정 (Redis 기반) ────────────────────────────────
+  cache:
+    type: redis
+    redis:
+      time-to-live: 3600000   # 1시간 (밀리초)
+      cache-null-values: false
+
+# ── 서버 설정 ─────────────────────────────────────────────────
+server:
+  port: ${SERVER_PORT:8080}
+  # K8s Graceful Shutdown 지원 (Pod 종료 시 진행 중인 요청 완료 대기)
+  shutdown: graceful
+
+# ── Spring Boot Graceful Shutdown 설정 ────────────────────────
+spring:
+  lifecycle:
+    # terminationGracePeriodSeconds와 동일하게 설정 (Deployment: 60s)
+    timeout-per-shutdown-phase: 55s
+
+# ── Actuator (헬스체크 엔드포인트) ───────────────────────────
+management:
+  server:
+    port: 8080   # 동일 포트 사용 (별도 관리 포트 없음)
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      # Liveness/Readiness 프로브 활성화
+      probes:
+        enabled: true
+      show-details: always
+      # 헬스 그룹 설정
+      group:
+        liveness:
+          include: livenessState,diskSpace
+        readiness:
+          include: readinessState,db,redis
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
+
+# ── 로깅 설정 ─────────────────────────────────────────────────
+logging:
+  # 환경변수로 오버라이드 가능 (ConfigMap에서 주입)
+  level:
+    root: ${LOGGING_LEVEL_ROOT:INFO}
+    com.example: ${LOGGING_LEVEL_COM_EXAMPLE:INFO}
+    org.springframework.web: WARN
+    org.hibernate.SQL: WARN
+  pattern:
+    # K8s 로그 수집기(Fluentd/Loki)를 위한 구조화 로그 형식
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{traceId}] %logger{36} - %msg%n"
+
+# ── 애플리케이션 정보 ─────────────────────────────────────────
+info:
+  app:
+    name: order-api
+    environment: ${APP_ENVIRONMENT:unknown}
+    version: "@project.version@"

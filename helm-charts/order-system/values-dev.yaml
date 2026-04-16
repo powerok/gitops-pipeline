@@ -1,0 +1,72 @@
+# =============================================================
+# Dev 환경 values 오버라이드 (values-dev.yaml)
+# 기본값(values.yaml)을 Dev 환경에 맞게 덮어쓴다.
+#
+# ArgoCD Application에서 다음과 같이 참조한다:
+#   helm:
+#     valueFiles:
+#       - values.yaml
+#       - values-dev.yaml
+# =============================================================
+
+global:
+  environment: dev
+
+# Dev: 레플리카 1개 (리소스 절약)
+replicaCount: 1
+
+image:
+  repository: harbor.local/gitops/order-api
+  # Jenkins CI가 이 값을 자동으로 업데이트한다.
+  # 예: tag: "main-abc12345"
+  tag: "latest"
+  pullPolicy: Always   # Dev에서는 항상 최신 이미지 Pull
+
+env:
+  SPRING_PROFILES_ACTIVE: "dev,k8s"
+  # Dev에서는 상세 로그 출력
+  LOGGING_LEVEL_ROOT: "DEBUG"
+  LOGGING_LEVEL_COM_EXAMPLE: "DEBUG"
+
+# Dev: 리소스 제한 완화
+resources:
+  requests:
+    cpu: "100m"
+    memory: "256Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+# Dev: Ingress 호스트 설정
+ingress:
+  hosts:
+    - host: order-api-dev.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+# Dev: HPA 비활성화
+autoscaling:
+  enabled: false
+
+# Dev: PostgreSQL 소규모 설정
+postgresql:
+  primary:
+    persistence:
+      size: 2Gi
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "128Mi"
+      limits:
+        cpu: "200m"
+        memory: "256Mi"
+
+# Dev: 헬스체크 타임아웃 완화 (느린 기동 허용)
+livenessProbe:
+  initialDelaySeconds: 90
+  failureThreshold: 5
+
+readinessProbe:
+  initialDelaySeconds: 60
+  failureThreshold: 5

@@ -1,0 +1,78 @@
+# =============================================================
+# ArgoCD Prod 환경 Application
+# 목적: order-prod 네임스페이스에 운영 환경 서비스를 배포한다.
+#
+# 운영 환경이므로 automated sync를 비활성화하고,
+# 수동 승인 후 동기화하도록 설정한다. (안전성 우선)
+#
+# 파일 위치 (Ops 리포지토리 기준): argocd/app-of-apps/prod-app.yaml
+# =============================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: order-api-prod
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: order-api
+    app.kubernetes.io/part-of: order-system
+    environment: prod
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"   # Dev 이후에 배포
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  # ── 소스: Ops 리포지토리의 Prod 환경 Helm Chart ───────────
+  source:
+    repoURL: http://gitea.local/gitops/order-ops.git
+    targetRevision: HEAD
+    path: helm-charts/order-system
+
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml   # Prod 환경 오버라이드 값
+
+      parameters:
+        - name: global.environment
+          value: prod
+        - name: replicaCount
+          value: "3"         # Prod에서는 레플리카 3개 (고가용성)
+        - name: image.repository
+          value: harbor.local/gitops/order-api
+
+  # ── 배포 대상: Prod 네임스페이스 ─────────────────────────
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: order-prod
+
+  # ── 동기화 정책: 운영 환경은 수동 동기화 (안전성) ─────────
+  syncPolicy:
+    # automated는 비활성화 - 운영 배포는 반드시 수동 승인 필요
+    # automated:
+    #   prune: true
+    #   selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - PruneLast=true
+    retry:
+      limit: 2
+      backoff:
+        duration: 60s
+        factor: 2
+        maxDuration: 5m
+
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+    # HPA에 의한 레플리카 변경 무시
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+      jsonPointers:
+        - /spec/minReplicas
+        - /spec/maxReplicas

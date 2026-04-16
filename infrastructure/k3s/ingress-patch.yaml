@@ -1,0 +1,51 @@
+# =============================================================
+# Ingress-Nginx 추가 설정 (K3s 최적화)
+# 파일 위치: infrastructure/k3s/ingress-patch.yaml
+#
+# 목적: Docker Desktop 환경에서 Ingress-Nginx가 호스트 포트에
+#       올바르게 바인딩되도록 설정을 패치한다.
+#
+# 적용 방법:
+#   kubectl patch deployment ingress-nginx-controller \
+#     -n ingress-nginx \
+#     --patch-file infrastructure/k3s/ingress-patch.yaml
+# =============================================================
+
+spec:
+  template:
+    spec:
+      containers:
+        - name: controller
+          # ── 추가 인수 ────────────────────────────────────────
+          args:
+            - /nginx-ingress-controller
+            # 기본 백엔드 없이 실행 (리소스 절약)
+            - --election-id=ingress-nginx-leader
+            - --controller-class=k8s.io/ingress-nginx
+            - --ingress-class=nginx
+            # X-Forwarded-For 헤더 신뢰 (Docker Desktop NAT 환경)
+            - --enable-real-ip
+            # 대용량 파일 업로드 지원 (Harbor, Git LFS)
+            - --annotations-prefix=nginx.ingress.kubernetes.io
+
+          # ── 환경 변수 ────────────────────────────────────────
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: LD_PRELOAD
+              value: /usr/local/lib/libmimalloc.so
+
+          # ── 리소스 제한 (K3s 로컬 환경) ─────────────────────
+          resources:
+            requests:
+              cpu: 100m
+              memory: 90Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

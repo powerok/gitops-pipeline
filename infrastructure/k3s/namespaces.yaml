@@ -1,0 +1,90 @@
+# =============================================================
+# Order System 네임스페이스 및 공통 리소스 설정
+# 파일 위치: infrastructure/k3s/namespaces.yaml
+#
+# 목적: 애플리케이션 배포에 필요한 네임스페이스와
+#       Maven 빌드 캐시 PVC를 미리 생성한다.
+#
+# 적용 방법:
+#   kubectl apply -f infrastructure/k3s/namespaces.yaml
+# =============================================================
+
+# ── Dev 환경 네임스페이스 ─────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: order-dev
+  labels:
+    app.kubernetes.io/part-of: order-system
+    environment: dev
+    # Ingress-Nginx가 이 네임스페이스의 Ingress를 처리하도록 설정
+    kubernetes.io/metadata.name: order-dev
+
+---
+# ── Prod 환경 네임스페이스 ────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: order-prod
+  labels:
+    app.kubernetes.io/part-of: order-system
+    environment: prod
+    kubernetes.io/metadata.name: order-prod
+
+---
+# ── Jenkins Maven 빌드 캐시 PVC ───────────────────────────────
+# Jenkins Agent Pod가 Maven 의존성 캐시를 재사용하기 위한 PVC
+# 이 PVC가 없으면 매 빌드마다 의존성을 새로 다운로드한다.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maven-cache-pvc
+  namespace: jenkins
+  labels:
+    app: jenkins
+    component: build-cache
+  annotations:
+    description: "Jenkins Maven 빌드 캐시 - 반복 빌드 속도 향상용"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+# ── Dev 환경 ResourceQuota (리소스 남용 방지) ─────────────────
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: order-dev-quota
+  namespace: order-dev
+spec:
+  hard:
+    # CPU 총합 제한
+    requests.cpu: "2"
+    limits.cpu: "4"
+    # 메모리 총합 제한
+    requests.memory: 4Gi
+    limits.memory: 8Gi
+    # PVC 개수 제한
+    persistentvolumeclaims: "5"
+    # Pod 개수 제한
+    pods: "20"
+
+---
+# ── Prod 환경 ResourceQuota ───────────────────────────────────
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: order-prod-quota
+  namespace: order-prod
+spec:
+  hard:
+    requests.cpu: "4"
+    limits.cpu: "8"
+    requests.memory: 8Gi
+    limits.memory: 16Gi
+    persistentvolumeclaims: "10"
+    pods: "50"

@@ -1,0 +1,247 @@
+{{/*
+=============================================================
+Helm Template: Order API Deployment
+파일 위치: helm-charts/order-system/templates/deployment.yaml
+
+핵심 구성 요소:
+  1. Init Container: PostgreSQL 준비 대기
+  2. Main Container: Order API (Spring Boot)
+  3. Sidecar Container: Redis (캐싱 레이어)
+=============================================================
+*/}}
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "order-system.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "order-system.labels" . | nindent 4 }}
+  annotations:
+    # 배포 시간 기록 (ArgoCD UI에서 확인 가능)
+    deployment.kubernetes.io/revision: "{{ .Release.Revision }}"
+    gitops.io/deployed-at: {{ now | date "2006-01-02T15:04:05Z" | quote }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+
+  # ── 무중단 배포 전략 (RollingUpdate) ─────────────────────
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # 최대 동시 업데이트 Pod 수: 전체의 25%
+      maxSurge: 25%
+      # 최소 유지 Pod 수: 전체의 75%
+      maxUnavailable: 25%
+
+  selector:
+    matchLabels:
+      {{- include "order-system.selectorLabels" . | nindent 6 }}
+
+  template:
+    metadata:
+      labels:
+        {{- include "order-system.selectorLabels" . | nindent 8 }}
+        # 환경 정보 레이블
+        app.kubernetes.io/version: {{ .Values.image.tag | quote }}
+        gitops.io/environment: {{ .Values.global.environment | quote }}
+      annotations:
+        # values.yaml 변경 시 Pod 자동 재시작을 유발하는 checksum
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+
+    spec:
+      # ── Harbor 이미지 Pull 인증 ──────────────────────────
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      serviceAccountName: {{ include "order-system.serviceAccountName" . }}
+
+      # ── Pod 보안 컨텍스트 ────────────────────────────────
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      # ══════════════════════════════════════════════════════
+      # Init Container: PostgreSQL 준비 상태 대기
+      # Order API가 시작되기 전에 DB 연결이 가능한지 확인한다.
+      # ══════════════════════════════════════════════════════
+      initContainers:
+        - name: wait-for-postgresql
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+
+          # PostgreSQL 5432 포트가 응답할 때까지 반복 대기
+          command:
+            - sh
+            - -c
+            - |
+              echo "⏳ PostgreSQL 연결 대기 중..."
+              until nc -z -w 3 {{ .Release.Name }}-postgresql 5432; do
+                echo "   PostgreSQL 응답 없음. 5초 후 재시도..."
+                sleep 5
+              done
+              echo "✅ PostgreSQL 연결 확인! Order API를 시작합니다."
+
+          # 리소스 최소화 (Init Container는 빠르게 완료되어야 함)
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+
+      # ══════════════════════════════════════════════════════
+      # 메인 컨테이너 + Sidecar 컨테이너 정의
+      # ══════════════════════════════════════════════════════
+      containers:
+
+        # ── [1] Order API (Spring Boot) ──────────────────────
+        - name: order-api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            # Spring Boot Actuator (관리 포트)
+            - name: management
+              containerPort: 8081
+              protocol: TCP
+
+          # ── 환경 변수: ConfigMap에서 주입 ────────────────
+          envFrom:
+            - configMapRef:
+                name: {{ include "order-system.fullname" . }}-config
+
+          # ── 환경 변수: Secret에서 주입 (DB 접속 정보) ───
+          env:
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dbSecret.name }}
+                  key: {{ .Values.dbSecret.usernameKey }}
+
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dbSecret.name }}
+                  key: {{ .Values.dbSecret.passwordKey }}
+
+            # Redis 연결 정보 (Sidecar이므로 localhost 사용)
+            - name: SPRING_REDIS_HOST
+              value: "localhost"
+            - name: SPRING_REDIS_PORT
+              value: "6379"
+
+            # Pod 이름을 환경 변수로 주입 (로그 추적용)
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+          # ── Liveness Probe: 앱이 살아있는지 확인 ─────────
+          # 실패 시: Pod를 재시작한다 (deadlock, OOM 등 복구)
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.livenessProbe.httpGet.path }}
+              port: {{ .Values.livenessProbe.httpGet.port }}
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+
+          # ── Readiness Probe: 트래픽 수신 준비 확인 ───────
+          # 실패 시: Service에서 제외 (무중단 배포의 핵심)
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.readinessProbe.httpGet.path }}
+              port: {{ .Values.readinessProbe.httpGet.port }}
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+
+          # ── 리소스 제한 ──────────────────────────────────
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          # ── 컨테이너 보안 컨텍스트 ───────────────────────
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+
+        # ── [2] Redis Sidecar (캐싱 레이어) ─────────────────
+        # Order API와 같은 Pod 내에서 실행되어 localhost로 통신
+        {{- if .Values.redis.enabled }}
+        - name: redis
+          image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
+          imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
+
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+
+          # Redis 설정 파일 지정 및 커스텀 옵션 적용
+          command:
+            - redis-server
+            - --maxmemory
+            - {{ .Values.redis.config.maxmemory | quote }}
+            - --maxmemory-policy
+            - {{ index .Values.redis.config "maxmemory-policy" | quote }}
+            - --save
+            - ""     # Sidecar에서는 RDB 영구 저장 비활성화 (캐시 역할만)
+
+          # Redis 헬스체크
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 999    # Redis 기본 UID
+        {{- end }}
+
+      # ── 노드 배치 설정 ────────────────────────────────────
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      # ── Pod 종료 대기 시간 ────────────────────────────────
+      # SIGTERM 수신 후 진행 중인 요청 처리를 위한 유예 시간
+      terminationGracePeriodSeconds: 60

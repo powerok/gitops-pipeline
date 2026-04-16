@@ -1,0 +1,161 @@
+# =============================================================
+# Helm Chart 기본 values.yaml
+# 위치: helm-charts/order-system/values.yaml
+#
+# 이 파일은 모든 환경의 기본값을 정의한다.
+# 환경별 오버라이드: values-dev.yaml, values-prod.yaml
+# =============================================================
+
+# ── 전역 설정 ─────────────────────────────────────────────────
+global:
+  environment: dev         # 현재 배포 환경 (ArgoCD가 오버라이드)
+  imagePullSecrets:
+    - name: harbor-credentials   # Harbor 레지스트리 인증 시크릿
+
+# ── Order API 설정 ────────────────────────────────────────────
+replicaCount: 1
+
+image:
+  repository: harbor.local/gitops/order-api
+  # tag: ArgoCD/Jenkins가 이 값을 동적으로 업데이트한다.
+  # 예: main-abc12345
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# ── 서비스 설정 ───────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 8080
+  targetPort: 8080
+
+# ── Ingress 설정 ──────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+  hosts:
+    - host: order-api.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# ── Order API 환경 변수 ───────────────────────────────────────
+env:
+  SPRING_PROFILES_ACTIVE: "k8s"
+  SERVER_PORT: "8080"
+  # DB 연결 정보는 Secret에서 주입 (아래 secretRef 참고)
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://order-postgresql:5432/orderdb"
+
+# ── 헬스체크 설정 ──────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /actuator/health/liveness
+    port: 8080
+  initialDelaySeconds: 60    # Spring Boot 기동 시간 고려
+  periodSeconds: 30
+  failureThreshold: 3
+  timeoutSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /actuator/health/readiness
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 3
+  timeoutSeconds: 5
+
+# ── 리소스 설정 ───────────────────────────────────────────────
+resources:
+  requests:
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"
+
+# ── Redis Sidecar 설정 ────────────────────────────────────────
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "7.2-alpine"
+    pullPolicy: IfNotPresent
+  port: 6379
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+  # Redis 설정
+  config:
+    maxmemory: "200mb"
+    maxmemory-policy: "allkeys-lru"
+
+# ── PostgreSQL 설정 (Bitnami Chart 의존성) ────────────────────
+postgresql:
+  enabled: true
+  auth:
+    database: orderdb
+    username: orderuser
+    # 비밀번호는 existingSecret으로 관리
+    existingSecret: order-db-secret
+    secretKeys:
+      adminPasswordKey: postgres-password
+      userPasswordKey: password
+  primary:
+    persistence:
+      enabled: true
+      storageClass: "local-path"
+      size: 5Gi
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
+# ── DB 시크릿 참조 설정 ───────────────────────────────────────
+# Order API Pod에서 DB 접속 정보를 환경 변수로 주입한다.
+dbSecret:
+  name: order-db-secret
+  usernameKey: username
+  passwordKey: password
+
+# ── HPA (Horizontal Pod Autoscaler) 설정 ─────────────────────
+autoscaling:
+  enabled: false      # 기본값: 비활성화 (Prod에서 활성화)
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# ── Pod 보안 설정 ─────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false   # Spring Boot 임시 파일 쓰기 허용
+  capabilities:
+    drop:
+      - ALL
+
+# ── 노드 배치 설정 ────────────────────────────────────────────
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ── ServiceAccount ────────────────────────────────────────────
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}

@@ -1,0 +1,21 @@
+{{/*
+=============================================================
+Service 템플릿
+=============================================================
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "order-system.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "order-system.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "order-system.selectorLabels" . | nindent 4 }}

@@ -1,0 +1,45 @@
+# =============================================================
+# K3s 레지스트리 설정 (registries.yaml)
+# 위치: /etc/rancher/k3s/registries.yaml (K3s 노드 내부)
+#
+# 목적: K3s 클러스터가 Harbor 레지스트리를 신뢰하도록 설정한다.
+#       Self-signed 인증서를 사용하는 Harbor에 대한 인증서 오류를 해결한다.
+#
+# 적용 방법:
+#   1. K3s 컨테이너 내부에 파일 복사:
+#      docker cp registries.yaml k3s-server:/etc/rancher/k3s/registries.yaml
+#   2. K3s 서비스 재시작:
+#      docker exec k3s-server systemctl restart k3s
+# =============================================================
+
+mirrors:
+  # Harbor 레지스트리 미러 설정
+  # harbor.local 도메인으로 이미지를 pull할 때 아래 endpoint로 라우팅된다.
+  "harbor.local":
+    endpoint:
+      - "https://harbor.local"
+      - "http://harbor.local"  # HTTPS 실패 시 HTTP로 폴백 (개발 환경용)
+
+  # IP 기반 접근도 허용 (Docker Desktop 환경 호환성)
+  "host.docker.internal:5000":
+    endpoint:
+      - "http://host.docker.internal:5000"
+
+configs:
+  # Harbor 레지스트리에 대한 인증 및 TLS 설정
+  "harbor.local":
+    auth:
+      # Harbor admin 계정 인증 정보
+      # 보안을 위해 실제 운영 환경에서는 K8s Secret으로 관리할 것
+      username: admin
+      password: "Harbor12345"   # Harbor 초기 설치 시 설정한 비밀번호로 변경 필요
+
+    tls:
+      # Self-signed 인증서 검증 건너뛰기 (개발 환경용)
+      # 운영 환경에서는 반드시 인증서를 제대로 설정해야 한다.
+      insecure_skip_verify: true
+
+      # CA 인증서를 직접 지정하는 방법 (권장):
+      # ca_file: "/etc/rancher/k3s/harbor-ca.crt"
+      # cert_file: "/etc/rancher/k3s/harbor-client.crt"
+      # key_file: "/etc/rancher/k3s/harbor-client.key"

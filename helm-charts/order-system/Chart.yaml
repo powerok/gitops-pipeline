@@ -1,0 +1,57 @@
+# =============================================================
+# Helm Chart 메타데이터 (Chart.yaml)
+# 위치: helm-charts/order-system/Chart.yaml
+#
+# 이 Chart는 다음 컴포넌트를 포함하는 주문 관리 시스템을 배포한다:
+#   - Order API (Spring Boot)
+#   - PostgreSQL (StatefulSet)
+#   - Redis (Sidecar 패턴)
+# =============================================================
+
+apiVersion: v2           # Helm v3 Chart API 버전
+name: order-system
+description: |
+  주문 관리 시스템 Helm Chart.
+  Order API (Spring Boot), PostgreSQL (StatefulSet), Redis (Sidecar)를
+  포함하는 MSA 기반 주문 처리 서비스를 배포한다.
+
+# Chart 타입: 애플리케이션 Chart (library Chart와 구분)
+type: application
+
+# Chart 버전 (Chart 자체의 버전 - 앱 버전과 독립적)
+version: 0.1.0
+
+# 배포되는 애플리케이션 버전
+appVersion: "1.0.0"
+
+# 유지보수자 정보
+maintainers:
+  - name: GitOps Team
+    email: gitops@company.com
+    url: https://gitea.local/gitops
+
+# 의존성 Chart 목록
+# helm dependency update 명령으로 다운로드한다.
+dependencies:
+  # PostgreSQL StatefulSet (Bitnami Chart 사용)
+  - name: postgresql
+    version: "15.5.17"
+    repository: "https://charts.bitnami.com/bitnami"
+    # condition: 이 값이 false이면 PostgreSQL을 설치하지 않음 (외부 DB 사용 시)
+    condition: postgresql.enabled
+    alias: postgresql    # templates/ 에서 .Values.postgresql 로 참조
+
+# Chart 검색을 위한 키워드
+keywords:
+  - order
+  - api
+  - spring-boot
+  - postgresql
+  - redis
+  - microservice
+
+# 아이콘 (ArgoCD UI에 표시)
+# icon: https://example.com/icon.png
+
+# 홈 URL
+home: https://gitea.local/gitops/order-ops

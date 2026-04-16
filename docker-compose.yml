@@ -1,0 +1,183 @@
+# =============================================================
+# GitOps Pipeline Docker Compose
+# 각 Step이 독립적인 서비스로 분리되어 있어, 실패 시 해당
+# Step부터 재시작 가능합니다.
+#
+# 전체 실행:
+#   docker compose up -d
+#
+# 특정 Step부터 재시작 (예: Step 07 Jenkins부터):
+#   docker compose up -d step-07-jenkins
+#   (의존 관계에 따라 이전 완료된 step들은 skip됨)
+#
+# 특정 Step만 단독 실행:
+#   docker compose run --rm step-07-jenkins
+# =============================================================
+
+x-provisioner-base: &provisioner-base
+  build:
+    context: .
+    dockerfile: infrastructure/provisioner/Dockerfile
+  volumes:
+    - .:/workspace
+    - /var/run/docker.sock:/var/run/docker.sock
+    - helm-config:/root/.config/helm   # Helm repo 캐시 공유 (step 간 공유)
+    - helm-cache:/root/.cache/helm     # Helm chart 캐시 공유
+  working_dir: /workspace
+  environment:
+    - KUBECONFIG=/workspace/infrastructure/k3s/output/kubeconfig.yaml
+    - GITEA_URL=http://gitea.local
+    - HARBOR_URL=http://harbor.local
+    - JENKINS_URL=http://jenkins.local
+    - ARGOCD_URL=http://argocd.local
+  networks:
+    - gitops-net
+  restart: "no"
+
+services:
+  # ── K3s 서버 (Control Plane) ─────────────────────────────────
+  k3s-server:
+    image: rancher/k3s:v1.29.4-k3s1
+    container_name: k3s-server
+    privileged: true
+    restart: unless-stopped
+    command:
+      - server
+      - --disable=traefik          # 기본 Traefik 비활성화 (Ingress-Nginx 사용)
+      - --disable=servicelb        # 기본 ServiceLB 비활성화
+      - --tls-san=k3s-server       # 컨테이너 호스트명을 TLS SAN에 추가
+      - --tls-san=localhost         # 로컬호스트 접근 허용
+      - --node-name=k3s-master     # 노드 이름 지정
+      - --kube-apiserver-arg=service-node-port-range=1-65535
+    environment:
+      K3S_TOKEN: "gitops-k3s-secret-token-2024"
+      K3S_KUBECONFIG_OUTPUT: /output/kubeconfig.yaml
+      K3S_KUBECONFIG_MODE: "666"
+    volumes:
+      - k3s-server-data:/var/lib/rancher/k3s
+      - ./infrastructure/k3s/output:/output
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "6443:6443"
+      - "80:80"
+      - "443:443"
+      - "30001:30001"
+      - "30002:30002"
+      - "30003:30003"
+      - "30004:30004"
+    networks:
+      gitops-net:
+        aliases:
+          - k3s-server
+          - gitea.local
+          - harbor.local
+          - jenkins.local
+          - argocd.local
+    healthcheck:
+      test: ["CMD", "kubectl", "get", "nodes"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── Step 01: Harbor 레지스트리 신뢰 + K3s 재시작 ──────────────
+  step-01-registry:
+    <<: *provisioner-base
+    container_name: gitops-step-01-registry
+    depends_on:
+      k3s-server:
+        condition: service_healthy
+    command: ["/bin/bash", "scripts/steps/step-01-registry.sh"]
+
+  # ── Step 02: CoreDNS 커스텀 도메인 설정 ───────────────────────
+  step-02-coredns:
+    <<: *provisioner-base
+    container_name: gitops-step-02-coredns
+    depends_on:
+      step-01-registry:
+        condition: service_completed_successfully
+    command: ["/bin/bash", "scripts/steps/step-02-coredns.sh"]
+
+  # ── Step 03: Helm 리포지토리 추가 ─────────────────────────────
+  step-03-helm-repos:
+    <<: *provisioner-base
+    container_name: gitops-step-03-helm-repos
+    depends_on:
+      step-02-coredns:
+        condition: service_completed_successfully
+    command: ["/bin/bash", "scripts/steps/step-03-helm-repos.sh"]
+
+  # ── Step 04: Ingress-Nginx 설치 ───────────────────────────────
+  step-04-ingress:
+    <<: *provisioner-base
+    container_name: gitops-step-04-ingress
+    depends_on:
+      step-03-helm-repos:
+        condition: service_completed_successfully
+    command: ["/bin/bash", "scripts/steps/step-04-ingress.sh"]
+
+  # ── Step 05: Gitea 설치 ────────────────────────────────────────
+  step-05-gitea:
+    <<: *provisioner-base
+    container_name: gitops-step-05-gitea
+    depends_on:
+      step-04-ingress:
+        condition: service_completed_successfully
+    command: ["/bin/bash", "scripts/steps/step-05-gitea.sh"]
+
+  # ── Step 06: Harbor 설치 ──────────────────────────────────────
+  step-06-harbor:
+    <<: *provisioner-base
+    container_name: gitops-step-06-harbor
+    depends_on:
+      step-05-gitea:
+        condition: service_completed_successfully
+    command: ["/bin/bash", "scripts/steps/step-06-harbor.sh"]
+
+  # ── Step 07: Jenkins 설치 (Secrets 포함) ──────────────────────
+  step-07-jenkins:
+    <<: *provisioner-base
+    container_name: gitops-step-07-jenkins
+    depends_on:
+      step-06-harbor:
+        condition: service_completed_successfully
+    command: ["/bin/bash", "scripts/steps/step-07-jenkins.sh"]
+
+  # ── Step 08: ArgoCD 설치 ──────────────────────────────────────
+  step-08-argocd:
+    <<: *provisioner-base
+    container_name: gitops-step-08-argocd
+    depends_on:
+      step-07-jenkins:
+        condition: service_completed_successfully
+    command: ["/bin/bash", "scripts/steps/step-08-argocd.sh"]
+
+  # ── Step 09: 초기 설정 (Gitea 봇/토큰, Harbor 프로젝트, ──────
+  #             Jenkins Secrets 갱신, ArgoCD Webhook)
+  step-09-setup:
+    <<: *provisioner-base
+    container_name: gitops-step-09-setup
+    depends_on:
+      step-08-argocd:
+        condition: service_completed_successfully
+    command: ["/bin/bash", "scripts/steps/step-09-setup.sh"]
+
+  # ── Step 10: Webhook 등록 + Source Push + App-of-Apps ─────────
+  step-10-apps:
+    <<: *provisioner-base
+    container_name: gitops-step-10-apps
+    depends_on:
+      step-09-setup:
+        condition: service_completed_successfully
+    command: ["/bin/bash", "scripts/steps/step-10-apps.sh"]
+
+# ── 볼륨 정의 ───────────────────────────────────────────────────
+volumes:
+  k3s-server-data:
+  helm-config:   # Helm repositories.yaml 영구 보관 (step 간 공유)
+  helm-cache:    # Helm chart 캐시 영구 보관 (step 간 공유)
+
+# ── 네트워크 정의 ────────────────────────────────────────────────
+networks:
+  gitops-net:
+    driver: bridge

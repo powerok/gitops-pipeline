@@ -1,0 +1,120 @@
+# =============================================================
+# Harbor Helm Chart values.yaml
+# Helm Chart: harbor/harbor (https://helm.goharbor.io)
+#
+# 설치 명령어:
+#   helm repo add harbor https://helm.goharbor.io
+#   helm repo update
+#   helm upgrade --install harbor harbor/harbor \
+#     --namespace harbor --create-namespace \
+#     -f infrastructure/harbor/values.yaml
+# =============================================================
+
+# ── 외부 접근 URL 설정 ────────────────────────────────────────
+expose:
+  type: ingress
+  tls:
+    enabled: false    # 개발 환경에서는 HTTP 사용 (운영 시 true로 변경)
+    certSource: auto
+  ingress:
+    hosts:
+      core: harbor.local      # Harbor 웹 UI 및 API
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "0"       # 이미지 레이어 업로드를 위한 무제한
+      nginx.ingress.kubernetes.io/proxy-buffering: "off"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "900"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "900"
+
+# Harbor 외부 URL (클라이언트가 이미지를 pull할 때 사용)
+externalURL: http://harbor.local
+
+# ── Harbor 관리자 비밀번호 ───────────────────────────────────
+harborAdminPassword: "Harbor12345"   # 설치 후 변경 필요
+
+# ── 데이터베이스 설정 ─────────────────────────────────────────
+database:
+  type: internal    # Harbor 내장 PostgreSQL 사용
+  internal:
+    password: "Harbor@DB2024!"
+
+# ── Redis 설정 ────────────────────────────────────────────────
+redis:
+  type: internal    # Harbor 내장 Redis 사용
+
+# ── 영구 스토리지 설정 ────────────────────────────────────────
+persistence:
+  enabled: true
+  resourcePolicy: "keep"    # Helm 삭제 시에도 PVC 유지
+  persistentVolumeClaim:
+    registry:
+      storageClass: "local-path"
+      size: 20Gi
+      accessMode: ReadWriteOnce
+    database:
+      storageClass: "local-path"
+      size: 5Gi
+      accessMode: ReadWriteOnce
+    redis:
+      storageClass: "local-path"
+      size: 1Gi
+      accessMode: ReadWriteOnce
+    trivy:
+      storageClass: "local-path"
+      size: 5Gi
+      accessMode: ReadWriteOnce
+
+# ── Trivy 취약점 스캔 설정 ────────────────────────────────────
+trivy:
+  enabled: true
+  image:
+    repository: goharbor/trivy-adapter-photon
+    tag: v2.10.0
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  # Trivy DB 업데이트 설정
+  gitHubToken: ""    # GitHub API 레이트 제한 회피용 (선택적)
+  skipUpdate: false  # 매 스캔 시 DB 업데이트 여부
+
+# ── 리소스 제한 ───────────────────────────────────────────────
+core:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+registry:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+portal:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+jobservice:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

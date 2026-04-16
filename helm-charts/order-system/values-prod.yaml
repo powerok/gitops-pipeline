@@ -1,0 +1,105 @@
+# =============================================================
+# Prod 환경 values 오버라이드 (values-prod.yaml)
+# 기본값(values.yaml)을 운영 환경에 맞게 덮어쓴다.
+#
+# 운영 환경 특징:
+#   - 고가용성: 레플리카 3개
+#   - HPA 활성화
+#   - 엄격한 리소스 제한
+#   - 최소한의 로그 출력
+# =============================================================
+
+global:
+  environment: prod
+
+# Prod: 고가용성을 위한 레플리카 3개
+replicaCount: 3
+
+image:
+  repository: harbor.local/gitops/order-api
+  # 운영 배포는 반드시 명시적 태그 사용 (latest 금지)
+  # Jenkins release 브랜치 빌드 시 자동 업데이트된다.
+  tag: "release-abc12345"
+  pullPolicy: IfNotPresent
+
+env:
+  SPRING_PROFILES_ACTIVE: "prod,k8s"
+  # Prod: 최소 로그 (성능 최적화)
+  LOGGING_LEVEL_ROOT: "WARN"
+  LOGGING_LEVEL_COM_EXAMPLE: "INFO"
+
+# Prod: 충분한 리소스 보장
+resources:
+  requests:
+    cpu: "500m"
+    memory: "768Mi"
+  limits:
+    cpu: "2000m"
+    memory: "1536Mi"
+
+# Prod: Ingress 설정 (TLS 활성화)
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # Prod에서는 TLS 사용 (cert-manager 필요)
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: order-api.company.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: order-api-tls
+      hosts:
+        - order-api.company.com
+
+# Prod: HPA 활성화 (자동 스케일링)
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Prod: 무중단 배포 전략 (RollingUpdate)
+# Deployment template에서 strategy 설정이 필요하다.
+
+# Prod: 엄격한 헬스체크
+livenessProbe:
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  failureThreshold: 3
+  timeoutSeconds: 10
+
+readinessProbe:
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 3
+  timeoutSeconds: 5
+
+# Prod: PostgreSQL 고가용성 설정
+postgresql:
+  primary:
+    persistence:
+      size: 20Gi
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        cpu: "2000m"
+        memory: "1Gi"
+
+# Prod: Pod 분산 배치 (가용성 향상)
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - order-api
+          topologyKey: kubernetes.io/hostname

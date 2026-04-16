@@ -1,0 +1,54 @@
+# =============================================================
+# ArgoCD App-of-Apps 루트 Application
+# 목적: 모든 환경(Dev/Prod)의 Application들을 하나의 Application으로 관리한다.
+#
+# App-of-Apps 패턴:
+#   root-app (이 파일) → dev-apps, prod-apps → 실제 서비스 Application들
+#
+# 적용 방법:
+#   kubectl apply -f argocd/app-of-apps/root-app.yaml -n argocd
+#   또는
+#   argocd app create -f argocd/app-of-apps/root-app.yaml
+# =============================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root-app               # ArgoCD UI에서 보이는 이름
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: gitops-pipeline
+    environment: all
+  # finalizer: ArgoCD 삭제 시 연결된 Application들도 함께 정리
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # ── ArgoCD 프로젝트 설정 ──────────────────────────────────
+  project: default
+
+  # ── 소스 설정: Ops 리포지토리를 모니터링한다 ──────────────
+  source:
+    repoURL: http://gitea.local/gitops/order-ops.git
+    targetRevision: HEAD       # 항상 최신 커밋을 추적
+    path: argocd/app-of-apps   # App-of-Apps 디렉토리
+
+  # ── 배포 대상 클러스터 ────────────────────────────────────
+  destination:
+    server: https://kubernetes.default.svc   # 클러스터 내부 API 서버
+    namespace: argocd
+
+  # ── 동기화 정책 ───────────────────────────────────────────
+  syncPolicy:
+    automated:
+      prune: true        # Ops 리포지토리에서 삭제된 리소스는 클러스터에서도 삭제
+      selfHeal: true     # 클러스터 상태가 Ops 리포지토리와 달라지면 자동 복구
+    syncOptions:
+      - CreateNamespace=true    # 네임스페이스가 없으면 자동 생성
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true          # 삭제는 마지막에 수행 (안전한 삭제 순서)
+    retry:
+      limit: 3           # 동기화 실패 시 최대 재시도 횟수
+      backoff:
+        duration: 30s    # 재시도 대기 시간
+        factor: 2        # 지수 백오프 배수
+        maxDuration: 5m  # 최대 대기 시간

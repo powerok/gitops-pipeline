@@ -1,0 +1,44 @@
+{{/*
+=============================================================
+NOTES.txt - Helm 설치 완료 후 출력되는 안내 메시지
+파일 위치: helm-charts/order-system/templates/NOTES.txt
+=============================================================
+*/}}
+
+🎉 Order System 배포 완료!
+
+환경: {{ .Values.global.environment | upper }}
+네임스페이스: {{ .Release.Namespace }}
+이미지 태그: {{ .Values.image.tag }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📌 구성 요소:
+  ✅ Order API (Spring Boot)   → {{ include "order-system.fullname" . }}:8080
+  {{- if .Values.redis.enabled }}
+  ✅ Redis Sidecar             → localhost:6379
+  {{- end }}
+  {{- if .Values.postgresql.enabled }}
+  ✅ PostgreSQL (StatefulSet)  → {{ .Release.Name }}-postgresql:5432
+  {{- end }}
+
+📌 접속 방법:
+{{- if .Values.ingress.enabled }}
+  브라우저: http://{{ (first .Values.ingress.hosts).host }}
+{{- else }}
+  kubectl port-forward svc/{{ include "order-system.fullname" . }} 8080:8080 -n {{ .Release.Namespace }}
+  브라우저: http://localhost:8080
+{{- end }}
+
+📌 헬스체크:
+  curl http://{{ (first .Values.ingress.hosts).host }}/actuator/health
+
+📌 로그 확인:
+  kubectl logs -l app.kubernetes.io/name={{ include "order-system.name" . }} \
+    -n {{ .Release.Namespace }} -c order-api --tail=100 -f
+
+📌 Pod 상태 확인:
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "order-system.name" . }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️  주의: DB 비밀번호는 K8s Secret(order-db-secret)으로 관리됩니다.

@@ -1,0 +1,106 @@
+# =============================================================
+# ArgoCD Project 정의
+# 파일 위치: argocd/app-of-apps/project.yaml
+#
+# 목적: App-of-Apps 패턴에서 사용할 ArgoCD Project를 정의한다.
+#       Project는 Application의 RBAC, 소스/대상 리소스를 제한한다.
+#
+# 적용 방법:
+#   kubectl apply -f argocd/app-of-apps/project.yaml -n argocd
+# =============================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: gitops-project
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: gitops-pipeline
+  # Project는 ArgoCD 삭제 시 함께 삭제되지 않도록 보호
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: "GitOps 파이프라인 프로젝트 - Dev/Prod 환경 관리"
+
+  # ── 허용 소스 리포지토리 ──────────────────────────────────
+  # 이 Project에 속한 Application은 아래 리포지토리만 참조할 수 있다.
+  sourceRepos:
+    - "http://gitea.local/gitops/order-ops.git"
+    - "http://gitea.local/gitops/*"   # gitops 조직의 모든 리포지토리 허용
+    - "https://charts.bitnami.com/bitnami"  # Bitnami Chart (PostgreSQL)
+
+  # ── 허용 배포 대상 ────────────────────────────────────────
+  destinations:
+    # Dev 환경
+    - namespace: order-dev
+      server: https://kubernetes.default.svc
+    # Prod 환경
+    - namespace: order-prod
+      server: https://kubernetes.default.svc
+    # ArgoCD 자체 (App-of-Apps)
+    - namespace: argocd
+      server: https://kubernetes.default.svc
+
+  # ── 허용 클러스터 리소스 (네임스페이스 수준 이상) ────────
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRole
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRoleBinding
+
+  # ── 허용 네임스페이스 리소스 ─────────────────────────────
+  namespaceResourceWhitelist:
+    - group: "apps"
+      kind: Deployment
+    - group: "apps"
+      kind: StatefulSet
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ConfigMap
+    - group: ""
+      kind: Secret
+    - group: ""
+      kind: PersistentVolumeClaim
+    - group: ""
+      kind: ServiceAccount
+    - group: "networking.k8s.io"
+      kind: Ingress
+    - group: "autoscaling"
+      kind: HorizontalPodAutoscaler
+    - group: "argoproj.io"
+      kind: Application   # App-of-Apps: 하위 Application 생성 허용
+
+  # ── RBAC 역할 정의 ────────────────────────────────────────
+  roles:
+    # Dev 환경 배포 권한 (Jenkins CI/CD)
+    - name: dev-deployer
+      description: "Dev 환경 배포 권한"
+      policies:
+        - p, proj:gitops-project:dev-deployer, applications, get, gitops-project/order-api-dev, allow
+        - p, proj:gitops-project:dev-deployer, applications, sync, gitops-project/order-api-dev, allow
+      groups:
+        - jenkins-bot
+
+    # Prod 환경 배포 권한 (운영팀만)
+    - name: prod-deployer
+      description: "Prod 환경 배포 권한 (수동 승인 필요)"
+      policies:
+        - p, proj:gitops-project:prod-deployer, applications, get, gitops-project/order-api-prod, allow
+        - p, proj:gitops-project:prod-deployer, applications, sync, gitops-project/order-api-prod, allow
+      groups:
+        - ops-team
+
+  # ── 동기화 창 (Sync Windows): Prod 배포 시간 제한 ─────────
+  syncWindows:
+    # Prod는 업무 시간(월~금 09:00~18:00 KST)에만 자동 배포 허용
+    - kind: allow
+      schedule: "0 0 * * 1-5"     # UTC 기준 (KST = UTC+9)
+      duration: 9h
+      applications:
+        - "order-api-prod"
+      namespaces:
+        - order-prod
+      manualSync: true   # 수동 동기화는 항상 허용

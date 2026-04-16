@@ -1,0 +1,77 @@
+# =============================================================
+# ArgoCD Dev 환경 Application
+# 목적: order-dev 네임스페이스에 개발 환경 서비스를 배포한다.
+#
+# 이 파일은 App-of-Apps 패턴의 두 번째 계층이다.
+# root-app이 이 파일을 감지하여 order-api-dev Application을 생성한다.
+#
+# 파일 위치 (Ops 리포지토리 기준): argocd/app-of-apps/dev-app.yaml
+# =============================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: order-api-dev
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: order-api
+    app.kubernetes.io/part-of: order-system
+    environment: dev
+  annotations:
+    # 슬랙 알림 연동 (선택적)
+    # notifications.argoproj.io/subscribe.on-sync-failed.slack: "gitops-alerts"
+    argocd.argoproj.io/sync-wave: "1"   # 배포 순서 (낮을수록 먼저 배포)
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  # ── 소스: Ops 리포지토리의 Dev 환경 Helm Chart ────────────
+  source:
+    repoURL: http://gitea.local/gitops/order-ops.git
+    targetRevision: HEAD
+    path: helm-charts/order-system
+
+    # Helm 설정 재정의 (Dev 환경 전용)
+    helm:
+      # values 파일 지정 (기본값 + 환경별 오버라이드)
+      valueFiles:
+        - values.yaml
+        - values-dev.yaml    # Dev 환경 오버라이드 값
+
+      # 개별 파라미터 오버라이드 (values 파일보다 우선순위 높음)
+      parameters:
+        - name: global.environment
+          value: dev
+        - name: replicaCount
+          value: "1"         # Dev에서는 레플리카 1개
+        - name: image.repository
+          value: harbor.local/gitops/order-api
+
+  # ── 배포 대상: Dev 네임스페이스 ──────────────────────────
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: order-dev
+
+  # ── 동기화 정책 ───────────────────────────────────────────
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true    # 대용량 리소스 지원
+    retry:
+      limit: 3
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 3m
+
+  # ── 헬스체크 무시 규칙 ────────────────────────────────────
+  ignoreDifferences:
+    # HPA가 현재 레플리카 수를 변경해도 ArgoCD가 OutOfSync로 표시하지 않음
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
