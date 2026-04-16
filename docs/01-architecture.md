@@ -61,7 +61,7 @@ graph TB
     end
 
     subgraph "CI 계층 (Continuous Integration)"
-        JENKINS["Jenkins\nShared Library + Jenkinsfile"]
+        JENKINS["Jenkins\nJCasC + Shared Library"]
         SHARED["pipelineUtils.groovy\n공통 함수 모듈"]
     end
 
@@ -93,8 +93,8 @@ graph TB
 
 ### 🧩 구조 상세 설명
 - **인프라 계층**: 기반이 되는 뼈대로서 K3s Control Plane이 구동되며, 외부의 사용자 HTTP 요청을 포워드하기 위해 Nginx-Ingress를 기본으로 사용합니다. 영구적인 스토리지 저장(Jenkins Workspace, Database 파일 등)을 위해 로컬 디스크를 자동 프로비저닝하는 `local-path-provisioner`를 채용하였습니다.
-- **소스 관리 / CI 계층**: Self-hosted 저장소를 구성하기 위해 가벼운 Gitea를 채택하고, 그 트리거를 받아들이는 Jenkins 인스턴스를 통해 CI 파이프라인의 코어 역할을 수행하고 있습니다.
-- **이미지 / CD 계층**: CI를 성공적으로 마친 컨테이너 이미지를 보관하고 검증하기 위한 OCI 규격 저장소(Harbor) 계층입니다. 동시에 CD를 책임지는 ArgoCD는 선언적인 인프라 정의(Declarative Infrastructure) 원칙을 K3s 클러스터 내부에 강제하는 컨트롤러 역할을 담당합니다. 
+- **CI 계층**: Self-hosted 저장소(Gitea) 트리거를 받아들이는 Jenkins 인스턴스는 **JCasC**를 통해 모든 설정이 자동화되어 있습니다. Jenkins는 공유 라이브러리를 통해 빌드 로직을 표준화하고 있습니다.
+- **이미지 / CD 계층**: CI를 성공적으로 마친 컨테이너 이미지를 보관하고 검증하기 위한 OCI 규격 저장소(Harbor) 계층입니다. 동시에 CD를 책임지는 ArgoCD는 **App-of-Apps** 패턴을 통해 전체 클러스터의 상태를 선언적으로 관리합니다.
 - **애플리케이션 계층**: 파이프라인의 종착 목적지입니다. GitOps의 App-of-Apps 패턴에 따라 ArgoCD로부터 관리받으며, 추후 `order-dev` 혹은 `order-prod` 와 같이 분리된 Kubernetes Namespace 위에서 격리 구동될 수 있습니다.
 
 ---

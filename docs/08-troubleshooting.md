@@ -1,172 +1,98 @@
 # 08. 트러블슈팅 가이드
 
-## 자주 발생하는 문제 및 해결 방법
+## 🚨 자주 발생하는 문제 및 해결 방법
 
 ---
 
-### 1. Harbor 이미지 Pull 실패 (인증서 오류)
+### 1. Jenkins SSH 연동 실패 (libcrypto / Permission denied)
 
 **증상**
-```
-Failed to pull image "harbor.local/gitops/order-api:latest":
-  rpc error: x509: certificate signed by unknown authority
-```
+- Jenkins 빌드 로그에 `Host key verification failed` 또는 `libcrypto.so.1.1: cannot open shared object file` 오류 발생.
+- `git clone` 시 `Permission denied (publickey)` 오류 발생.
 
-**원인**: K3s가 Harbor의 Self-signed 인증서를 신뢰하지 않음
+**원인**
+- Jenkins Agent Pod 내의 SSH 관련 라이브러리 충돌 또는 `/var/jenkins_home/.ssh`의 권한(0700) 이슈.
 
 **해결 방법**
-
-```bash
-# 1. registries.yaml을 K3s 컨테이너에 복사
-docker cp infrastructure/k3s/registries.yaml \
-  k3s-server:/etc/rancher/k3s/registries.yaml
-
-# 2. K3s 재시작
-docker exec k3s-server systemctl restart k3s
-
-# 3. 동작 확인
-kubectl run test-pull --image=harbor.local/gitops/order-api:latest \
-  --restart=Never --rm -it -- echo "Pull 성공"
-```
+- **마운트 방식 사용**: 본 프로젝트는 SSH 키를 `/var/jenkins_ssh` 경로에 0400 권한으로 마운트하여 권한 충돌을 방지합니다.
+- **Service Name 사용**: Gitea 접근 시 IP 대신 내부 서비스 도메인을 사용하는지 확인하세요.
+  `ssh://git@gitea-ssh.gitea.svc.cluster.local:2222/gitops/order-api.git`
 
 ---
 
-### 2. Init Container가 무한 대기 상태
+### 2. Jenkins Webhook 401 Unauthorized / 403 Forbidden
 
 **증상**
-```
-$ kubectl get pods -n order-dev
-NAME                      READY   STATUS     RESTARTS
-order-system-xxx          0/2     Init:0/1   0
-```
+- Gitea → Webhook 전송 이력에 `401` 또는 `403` 상태 코드가 표시됨.
+- Jenkins 로그에 `CrumbIssuer` 또는 `Anonymous ignore` 관련 메시지 출력.
 
-**원인**: PostgreSQL이 아직 준비되지 않았거나, StatefulSet 이름이 다름
+**원인**
+- Jenkins의 CSRF 보호 기능이 외부 Webhook 요청을 차단함.
 
 **해결 방법**
-
-```bash
-# Init Container 로그 확인
-kubectl logs order-system-xxx -c wait-for-postgresql -n order-dev
-
-# PostgreSQL 서비스 이름 확인
-kubectl get svc -n order-dev | grep postgres
-
-# StatefulSet 상태 확인
-kubectl get statefulset -n order-dev
-kubectl describe statefulset order-postgresql -n order-dev
-```
+- **CSRF 토큰 체크 해제 (JVM 옵션)**: `values.yaml`의 `javaOpts`에 `-Dhudson.plugins.git.GitStatus.NOTIFY_COMMIT_TOKEN_REQUIRED=false`가 포함되어 있는지 확인하세요.
+- **익명 읽기 권한**: JCasC 설정에서 `Job/Build` 및 `Job/Read` 권한이 `anonymous`에게 부여되어 있는지 확인하세요.
 
 ---
 
-### 3. Jenkins Webhook이 동작하지 않음
-
-**증상**: Gitea에 Push해도 Jenkins 빌드가 트리거되지 않음
-
-**해결 방법**
-
-```bash
-# 1. Gitea → Webhook → 최근 요청 이력 확인
-# Gitea Web UI: Settings → Webhooks → 테스트 버튼 클릭
-
-# 2. Jenkins 로그 확인
-kubectl logs -l app.kubernetes.io/name=jenkins \
-  -n jenkins -c jenkins --tail=100 | grep -i webhook
-
-# 3. Jenkins에서 Gitea 플러그인 설정 확인
-# Manage Jenkins → Configure System → Gitea Servers
-
-# 4. Webhook 재등록
-bash scripts/setup-webhook.sh
-```
-
----
-
-### 4. ArgoCD OutOfSync 무한 반복
-
-**증상**: ArgoCD가 계속 OutOfSync 상태로 표시되며 Sync가 반복됨
-
-**원인**: Deployment의 replicas를 HPA가 변경하면 ArgoCD가 차이를 감지
-
-**해결 방법**: `ignoreDifferences` 설정 확인
-
-```yaml
-# argocd/applications/dev/order-api-dev.yaml
-spec:
-  ignoreDifferences:
-    - group: apps
-      kind: Deployment
-      jsonPointers:
-        - /spec/replicas  # HPA가 변경하는 필드 무시
-```
-
----
-
-### 5. Trivy 스캔 타임아웃
+### 3. Gitea/Harbor 도메인 인식 불가 (Internal DNS)
 
 **증상**
-```
-❌ 취약점 스캔 실패: 타임아웃
-```
+- Jenkins 또는 ArgoCD 로그에 `dial tcp: lookup gitea.local: no such host` 오류 발생.
 
-**원인**: Harbor Trivy DB 업데이트가 느리거나 네트워크 문제
+**원인**
+- K3s 클러스터 내부의 Pod들이 로컬 `/etc/hosts`에 등록된 `.local` 도메인을 알지 못함.
 
 **해결 방법**
-
-```bash
-# Trivy 어댑터 Pod 재시작
-kubectl rollout restart deployment harbor-trivy -n harbor
-
-# Trivy DB 업데이트 트리거 (Harbor UI)
-# Administration → Interrogation Services → SCAN NOW
-
-# 또는 스캔 타임아웃 값 증가 (pipelineUtils.groovy)
-# scanTimeout: 600  # 10분으로 늘리기
-```
+- **hostAliases 설정**: Helm `values.yaml`의 `hostAliases` 섹션에 K3s 서버의 IP와 `.local` 도메인들을 수동으로 추가해야 합니다.
+  (`scripts/steps/step-07-jenkins.sh` 가 설치 시 자동으로 주입합니다.)
 
 ---
 
-### 6. Helm 배포 실패 (PVC Pending)
+### 4. JCasC 설정이 반영되지 않음
 
 **증상**
-```
-Error: INSTALLATION FAILED: PersistentVolumeClaim "order-postgresql-pvc" is pending
-```
+- `values.yaml`을 수정하고 `helm upgrade`를 했으나 Jenkins 설정이 변하지 않음.
 
-**원인**: local-path-provisioner가 동작하지 않음
+**원인**
+- JCasC는 기본적으로 설정 파일의 변경을 감지하여 리로드하지만, 때때로 수동 트리거가 필요할 수 있습니다.
 
 **해결 방법**
-
 ```bash
-# StorageClass 확인
-kubectl get storageclass
+# Jenkins 관리자 권한으로 설정 리로드 시도
+curl -X POST -u admin:Jenkins@Admin2024! http://jenkins.local/configuration-as-code/reload
 
-# local-path-provisioner Pod 상태 확인
-kubectl get pods -n kube-system | grep local-path
-
-# 재시작
-kubectl rollout restart deployment local-path-provisioner -n kube-system
+# 또는 Pod 재시작 (가장 확실함)
+kubectl rollout restart deployment jenkins -n jenkins
 ```
 
 ---
 
-## 유용한 진단 명령어 모음
+### 5. ArgoCD OutOfSync (Resource Excluded)
+
+**증상**
+- ArgoCD에서 특정 리소스가 무한히 `OutOfSync` 상태이거나 무시됨.
+
+**해결 방법**
+- `argocd/applications/dev/order-api-dev.yaml` 내 `ignoreDifferences`를 확인하세요.
+- 특히 `replicas`를 HPA가 제어하는 경우 ArgoCD가 이를 차이로 인식하지 않도록 설정해야 합니다.
+
+---
+
+## 🔍 유용한 진단 명령어 모음 (Stabilized)
 
 ```bash
-# ── 전체 파드 상태 한눈에 보기 ──────────────────────────────
-kubectl get pods --all-namespaces | grep -v Running | grep -v Completed
+# ── Jenkins Webhook 트리거 강제 실행 ────────────────────────
+curl -X POST "http://jenkins.local/generic-webhook-trigger/invoke?token=order-api-token-2024"
 
-# ── 이벤트 확인 (오류 우선) ─────────────────────────────────
-kubectl get events --all-namespaces --sort-by='.lastTimestamp' | tail -30
+# ── Gitea 내부 SSH 연결 테스트 (Jenkins Pod 안에서) ─────────
+JENKINS_POD=$(kubectl get pods -n jenkins -l app.kubernetes.io/instance=jenkins -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -it -n jenkins "$JENKINS_POD" -- ssh -v -p 2222 git@gitea-ssh.gitea.svc.cluster.local
 
-# ── ArgoCD 앱 상태 ───────────────────────────────────────────
-argocd app list
-argocd app get order-api-dev --show-operation
+# ── JCasC 설정 내용 전체 보기 ──────────────────────────────
+# Jenkins UI: Manage Jenkins -> Configuration as Code -> View Configuration
 
-# ── Harbor API 직접 조회 ─────────────────────────────────────
-curl -u admin:Harbor12345 http://harbor.local/api/v2.0/projects \
-  | jq '.[].name'
-
-# ── Jenkins 빌드 로그 스트리밍 ───────────────────────────────
-kubectl logs -f -l app.kubernetes.io/component=jenkins-controller \
-  -n jenkins -c jenkins
+# ── Webhook 수신 상세 로그 확인 ─────────────────────────────
+# Jenkins UI: Manage Jenkins -> System Log -> New Log Recorder
+# Logger 추가: "org.jenkinsci.plugins.gwt" (Level: ALL)
 ```

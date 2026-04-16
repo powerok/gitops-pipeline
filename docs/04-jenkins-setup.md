@@ -1,123 +1,99 @@
-# 04. Jenkins 설정 가이드
+# 04. Jenkins 설정 가이드 (JCasC 중심)
 
-## 설치
+## 개요
+
+본 프로젝트의 Jenkins는 **JCasC(Jenkins Configuration as Code)**를 통해 코드 기반으로 설정됩니다. 이를 통해 인스턴스 재시작 시에도 동일한 설정(자격증명, 플러그인 설정, Job 정의 등)이 유지되며, 수동 설정의 번거로움을 최소화합니다.
+
+---
+
+## 🏗️ 설치 및 초기화
+
+Jenkins는 Helm 차트를 통해 설치되며, `scripts/steps/step-07-jenkins.sh`에 의해 자동화됩니다.
 
 ```bash
-helm repo add jenkins https://charts.jenkins.io
-helm repo update
-
-# 시크릿 먼저 생성 (Gitea 토큰을 스크립트 실행 후 넣어야 한다)
-GITEA_TOKEN=$(cat .jenkins-gitea-token)
-kubectl create namespace jenkins --dry-run=client -o yaml | kubectl apply -f -
-kubectl create secret generic jenkins-secrets \
-  --namespace jenkins \
-  --from-literal=gitea-token="${GITEA_TOKEN}" \
-  --from-literal=harbor-password="Harbor12345" \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-# Jenkins 설치
+# Jenkins 설치 (JCasC 설정 포함)
 helm upgrade --install jenkins jenkins/jenkins \
   --namespace jenkins \
   --create-namespace \
   -f infrastructure/jenkins/values.yaml \
-  --wait --timeout=15m
+  --wait
 ```
+
+### 🔐 시크릿 및 환경 변수 주입
+JCasC 설정 내에서 사용되는 민감한 정보(토큰, 비밀번호, SSH 키)는 Kubernetes Secret(`jenkins-secrets`)을 통해 환경 변수로 주입됩니다.
+
+| 환경 변수명 | 설명 | 주입처 |
+|------|------|------|
+| `GITEA_JENKINS_PASS` | Jenkins 봇 계정 비밀번호 | JCasC (Credentials) |
+| `GITEA_SSH_KEY` | ED25519 Private Key | JCasC (SSH Credentials) |
+| `HARBOR_ADMIN_PASSWORD` | Harbor 관리자 비밀번호 | JCasC (Credentials) |
 
 ---
 
-## Shared Library 구조
+## 🛠️ JCasC 주요 설정항목
 
-```mermaid
-graph TB
-    subgraph SharedLib["jenkins-shared-library 리포지토리"]
-        VARS["vars/\n전역 함수 (DSL 방식)"]
-        SRC["src/\n클래스 (고급 로직)"]
+`infrastructure/jenkins/values.yaml` 내 `controller.JCasC.configScripts` 섹션에서 관리됩니다.
 
-        subgraph VARS_FILES["vars/ 파일"]
-            PU["pipelineUtils.groovy\n├ buildAndPushImage()\n├ checkVulnerabilities()\n├ updateOpsRepo()\n└ notifySlack()"]
-        end
-    end
+### 1. 보안 설정 (Security)
+Gitea로부터의 Webhook 수신 및 원활한 자동화를 위해 다음과 같은 권한 전략을 사용합니다.
+- **Global Matrix Authorization**: 익명 사용자의 빌드 트리거 및 읽기 권한을 허용하여 Gitea Webhook이 인증 없이 Jenkins에 접근할 수 있도록 합니다.
 
-    subgraph Jenkinsfile["Jenkinsfile (App Repo)"]
-        CALL["@Library('gitops-shared-lib') _\n\npipelineUtils.buildAndPushImage(...)"]
-    end
+### 2. Gitea 서버 및 자격증명
+- **Local Gitea**: `http://gitea.local` 주소로 서버를 정의합니다.
+- **Credentials**: `jenkins-bot` 계정을 위한 `usernamePassword` 및 `basicSSHUserPrivateKey` 자격증명을 자동으로 생성합니다.
 
-    PU -->|import| CALL
-```
+### 3. 공유 라이브러리 (Shared Library)
+- `gitops-shared-lib`이라는 이름의 라이브러리를 모든 파이프라인에서 **암시적(Implicit)**으로 로드하도록 설정합니다.
+- 저장소: `http://gitea.local/gitops/jenkins-shared-library.git`
 
-### 주요 함수 설명
-
-| 함수 | 역할 |
-|------|------|
-| `buildAndPushImage()` | Docker 빌드 → Harbor Push (latest + 버전 태그) |
-| `checkVulnerabilities()` | Trivy 스캔 완료 대기 → CRITICAL 취약점 확인 |
-| `updateOpsRepo()` | Ops 리포지토리 `sed` 태그 업데이트 → git push |
-| `notifySlack()` | Slack 채널 알림 (선택적) |
+### 4. Job 자동 생성 (Job DSL)
+- `order-api-pipeline`을 자동으로 생성하며, `Generic Webhook Trigger` 설정을 포함합니다.
 
 ---
 
-## DooD (Docker-outside-of-Docker) 방식
+## 🖇️ Gitea Webhook 연동 (Generic Webhook Trigger)
+
+본 프로젝트는 Gitea 플러그인의 기본 기능을 확장하여, `generic-webhook-trigger`를 통해 더욱 세밀한 트리거 제어를 수행합니다.
+
+- **Trigger URL**: `http://jenkins.local/generic-webhook-trigger/invoke?token=order-api-token-2024`
+- **Token**: `order-api-token-2024` (JCasC Job DSL에 정의됨)
+- **CSRF 방지 무시**: Gitea → Jenkins 통신 시 CSRF Crumb 오류를 방지하기 위해 JVM 옵션(`-Dhudson.plugins.git.GitStatus.NOTIFY_COMMIT_TOKEN_REQUIRED=false`)이 적용되어 있습니다.
+
+---
+
+## 🔑 SSH 인증 및 안정성 확보
+
+Jenkins Pod에서 Gitea 리포지토리를 SSH로 클론할 때 발생할 수 있는 `libcrypto` 공유 라이브러리 로딩 이슈 및 키 파일 권한 문제를 해결하기 위해 다음과 같은 아키텍처를 채택했습니다.
 
 ```mermaid
 graph LR
-    subgraph JenkinsPod["Jenkins Agent Pod"]
-        DOCKER_CLI["Docker CLI\n(docker build/push)"]
+    subgraph Secret["K8s Secret (jenkins-secrets)"]
+        KEY["gitea-ssh-key (Private Key)"]
     end
 
-    subgraph Host["K3s 호스트"]
-        DOCKER_SOCK["/var/run/docker.sock"]
-        DOCKER_DAEMON["Docker Daemon\n(실제 빌드 실행)"]
+    subgraph Pod["Jenkins Controller Pod"]
+        VOL["/var/jenkins_ssh/id_ed25519 (ReadOnly)"]
+        JCasC["JCasC Credentials Loader"]
     end
 
-    subgraph Harbor["Harbor Registry"]
-        IMG["gitops/order-api:tag"]
-    end
-
-    DOCKER_CLI -->|소켓 마운트| DOCKER_SOCK
-    DOCKER_SOCK --> DOCKER_DAEMON
-    DOCKER_DAEMON -->|이미지 Push| IMG
+    Secret -->|Volume Mount| VOL
+    JCasC -->|Direct Entry| KEY
 ```
 
-> **DooD 주의사항**: 호스트의 Docker Daemon을 공유하므로 보안에 유의해야 한다. 운영 환경에서는 `kaniko`를 사용하는 것을 권장한다.
+- **Volume Mount**: SSH 키를 `/var/jenkins_ssh`에 읽기 전용으로 마운트하여 파일 권한(0400) 이슈를 해결합니다.
+- **Direct Entry**: JCasC에서는 시크릿 값을 직접 스트링으로 읽어와 Jenkins 내부 자격증함에 등록합니다.
 
 ---
 
-## 파이프라인 흐름 다이어그램
+## 📂 Shared Library 구조 및 DooD 방식
 
-```mermaid
-flowchart TD
-    A[🔍 Checkout\nGitea에서 코드 Pull] --> B
-    B[🧪 Unit Test\nmvn clean test] --> C{테스트 통과?}
-    C -->|실패| FAIL[❌ 파이프라인 종료\nSlack 알림]
-    C -->|성공| D[🔨 Build\nmvn package -DskipTests]
-    D --> E[🐳 Build & Push\ndocker build + push to Harbor]
-    E --> F[🔍 Vulnerability Scan\nTrivy 스캔 대기 및 결과 확인]
-    F --> G{CRITICAL 취약점?}
-    G -->|발견| FAIL
-    G -->|없음| H{main/release 브랜치?}
-    H -->|No| SKIP[ℹ️ Ops 업데이트 건너뜀]
-    H -->|Yes| I[🔄 Update Ops Repo\nsed로 이미지 태그 교체\ngit commit & push]
-    I --> J[📢 Notify\n완료 알림]
-    SKIP --> J
-    J --> SUCCESS[✅ 완료]
-```
+(기존 내용 유지 시)
+> 상세한 Shared Library 함수 설명 및 Docker 빌드 방식(DooD)은 상위 문서 및 `07-pipeline-flow.md`를 참고하세요.
 
 ---
 
-## Maven 빌드 캐시 PVC 생성
+## 🧪 Maven 빌드 캐시 설정
 
-```bash
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: maven-cache-pvc
-  namespace: jenkins
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 5Gi
-EOF
-```
+빌드 속도 향상을 위해 Maven 로컬 레포지토리(`.m2/repository`)를 PVC에 영구 보관합니다.
+- **PVC 이름**: `maven-cache-pvc`
+- **경로**: Jenkins Pod의 `/root/.m2/repository` (Agent Pod 설정 시 마운트)
